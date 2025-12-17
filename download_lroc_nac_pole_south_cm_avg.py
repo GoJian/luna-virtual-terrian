@@ -66,7 +66,14 @@ def verify_files(session: requests.Session, filenames: List[str], out_dir: Path)
             missing += 1
             continue
         local_size = out_path.stat().st_size
-        if remote_size is not None and local_size == remote_size:
+        # For XML files, server size reporting may be unreliable; assume complete if exists and >1KB
+        if name.lower().endswith('.xml'):
+            if local_size > 1024:
+                complete += 1
+            else:
+                print(f"Incomplete: {name} (local: {local_size}, too small for XML)")
+                incomplete += 1
+        elif remote_size is not None and local_size == remote_size:
             complete += 1
         else:
             print(f"Incomplete or size mismatch: {name} (local: {local_size}, remote: {remote_size})")

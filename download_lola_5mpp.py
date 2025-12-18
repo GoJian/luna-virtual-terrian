@@ -1,26 +1,18 @@
 #!/usr/bin/env python3
 """
-Download LROC RDR product tiles from the NAC_POLE_SOUTH_CM_AVG directory listing.
+Download LOLA 5mpp product tiles.
 
-Source index (Apache listing):
-https://lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/LROLRC_2001/EXTRAS/BROWSE/NAC_POLE/NAC_POLE_SOUTH_CM_AVG
-
-The HTML page itself indicates the canonical base URL for downloads is the pds host:
-https://pds.lroc.im-ldi.com/data/.../EXTRAS/BROWSE/NAC_POLE/NAC_POLE_SOUTH_CM_AVG/
+Files are hardcoded as the directory does not provide an Apache-style listing.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
-import hashlib
-import os
-import re
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Optional
 from urllib.parse import urljoin
 
 import requests
@@ -30,17 +22,16 @@ from tqdm import tqdm
 # Configuration / constants
 # -----------------------------
 
-# Index page you can open in a browser (easy to inspect):
-INDEX_URL = (
-    "https://lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/"
-    "LROLRC_2001/EXTRAS/BROWSE/NAC_POLE/NAC_POLE_SOUTH_CM_AVG"
-)
+# Base URL for downloads:
+BASE_URL = "https://pgda.gsfc.nasa.gov/data/LOLA_5mpp/87S/"
 
-# Canonical download base URL shown at top of the index page (line 0 in the listing):
-BASE_URL = (
-    "https://pds.lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/"
-    "LROLRC_2001/EXTRAS/BROWSE/NAC_POLE/NAC_POLE_SOUTH_CM_AVG/"
-)
+# Default files to download (remote names, lowercase)
+FILES_DEFAULT = [
+    "ldem_87s_5mpp.tif",            # elevation (meters)
+    "ldem_87s_5mpp_hillshade.tif",  # hillshade
+    "ldsm_87s_5mpp.tif",            # slope (degrees)
+    "ldec_87s_5mpp.tif",            # counts
+]
 
 # Conservative timeout: (connect, read)
 TIMEOUT = (30, 300)
@@ -79,105 +70,6 @@ def verify_files(session: requests.Session, filenames: List[str], out_dir: Path)
             print(f"Incomplete or size mismatch: {name} (local: {local_size}, remote: {remote_size})")
             incomplete += 1
     print(f"Verification complete: {complete} complete, {incomplete} incomplete, {missing} missing")
-
-
-def fetch_index_html(session: requests.Session) -> str:
-    max_retries = 6
-    for attempt in range(1, max_retries + 1):
-        try:
-            r = session.get(INDEX_URL, timeout=TIMEOUT)
-            r.raise_for_status()
-            return r.text
-        except Exception as e:
-            if attempt == max_retries:
-                raise
-            sleep_s = min(2 ** attempt, 30)
-            print(f"[retry {attempt}/{max_retries}] Fetching index: {e} (sleep {sleep_s}s)")
-            time.sleep(sleep_s)
-
-
-def parse_index_for_filenames(html: str) -> List[str]:
-    """
-    Parse the Apache-style listing HTML and extract file names from <a href="...">.
-    """
-    # Typical listing has <a href="FILENAME">FILENAME</a>
-    hrefs = re.findall(r'href="([^"]+)"', html, flags=re.IGNORECASE)
-    names = []
-    for h in hrefs:
-        # filter out Parent Directory and subpaths
-        if h in ("../", "/"):
-            continue
-        # In Apache listings, href is the filename
-        if h.endswith("/"):
-            continue
-        # Avoid query strings
-        h = h.split("?", 1)[0]
-        # Some listings include absolute paths; keep basename
-        name = os.path.basename(h)
-        if name:
-            names.append(name)
-    # Deduplicate but keep stable order
-    seen = set()
-    out = []
-    for n in names:
-        if n not in seen:
-            seen.add(n)
-            out.append(n)
-    return out
-
-
-def filter_files(
-    filenames: Iterable[str],
-    include_ext: Tuple[str, ...],
-    include_masks: bool,
-    include_pyramids: bool,
-    include_xml: bool,
-    include_browse_png: bool,
-) -> List[str]:
-    """
-    Decide which files to download based on extension and suffix patterns.
-    """
-    include_ext = tuple(e.lower().lstrip(".") for e in include_ext)
-
-    keep: List[str] = []
-    for fn in filenames:
-        lower = fn.lower()
-
-        # Always skip tiny icons / non-data stuff if any appear
-        if lower.endswith((".gif", ".ico")):
-            continue
-
-        # Browse PNGs are explicit in name: *.BROWSE.PNG
-        if lower.endswith(".browse.png"):
-            if include_browse_png:
-                keep.append(fn)
-            continue
-
-        # Masks: *.MASK.TIF
-        if lower.endswith(".mask.tif"):
-            if include_masks:
-                keep.append(fn)
-            continue
-
-        # Pyramids: *.PYR.TIF (these are HUGE; often not needed for your pipeline)
-        if lower.endswith(".pyr.tif"):
-            if include_pyramids:
-                keep.append(fn)
-            continue
-
-        # XML sidecars
-        if lower.endswith(".xml"):
-            if include_xml:
-                keep.append(fn)
-            continue
-
-        # Main GeoTIFF tiles: *.TIF
-        # Note: this will also match MASK/PYR, but those were already handled above.
-        ext = lower.rsplit(".", 1)[-1] if "." in lower else ""
-        if ext in include_ext:
-            keep.append(fn)
-
-    return keep
 
 
 def remote_head(session: requests.Session, url: str) -> Optional[int]:
@@ -264,47 +156,28 @@ def download_with_resume(
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Download LROC NAC South Pole Controlled Average Mosaic tiles (NAC_POLE_SOUTH_CM_AVG)."
+        description="Download LOLA 5mpp product tiles."
     )
-    ap.add_argument("--out", type=Path, default=Path("data/NAC_POLE_SOUTH_CM_AVG"), help="Output directory")
-    ap.add_argument(
-        "--ext",
-        nargs="+",
-        default=["tif"],
-        help="Main extensions to include (default: tif). Example: --ext tif",
-    )
-    ap.add_argument("--include-browse-png", action="store_true", help="Also download *.BROWSE.PNG preview images")
-    ap.add_argument("--include-masks", action="store_true", help="Also download *.MASK.TIF files")
-    ap.add_argument("--include-pyramids", action="store_true", help="Also download *.PYR.TIF files (VERY large)")
-    ap.add_argument("--include-xml", action="store_true", help="Also download *.xml label files")
+    ap.add_argument("--out", type=Path, default=Path("data/DEM_LOLA_5mpp"), help="Output directory")
+    ap.add_argument("--files", nargs="*", default=FILES_DEFAULT,
+                    help="File list to download (default: standard LOLA 5mpp files).")
     ap.add_argument("--max-workers", type=int, default=1, help="Parallel download workers (default: 1)")
     ap.add_argument("--dry-run", action="store_true", help="List what would be downloaded, but don't download")
     ap.add_argument("--verify", action="store_true", help="Verify existing files against remote sizes")
     args = ap.parse_args()
 
+    selected = args.files
+
     with requests.Session() as session:
-        html = fetch_index_html(session)
-        all_names = parse_index_for_filenames(html)
-
-        selected = filter_files(
-            all_names,
-            include_ext=tuple(args.ext),
-            include_masks=args.include_masks,
-            include_pyramids=args.include_pyramids,
-            include_xml=args.include_xml,
-            include_browse_png=args.include_browse_png,
-        )
-
         if args.verify:
             verify_files(session, selected, args.out)
             return
 
         # Convert to full URLs
-        remotes = [RemoteFile(name=n, url=urljoin(BASE_URL, n)) for n in selected]
+        remotes = [RemoteFile(name=n.upper(), url=urljoin(BASE_URL, n)) for n in selected]
 
-        print(f"Index: {INDEX_URL}")
         print(f"Base : {BASE_URL}")
-        print(f"Found {len(all_names)} files; selected {len(remotes)} files.")
+        print(f"Selected {len(remotes)} files.")
 
         # Check for existing files
         existing = []
@@ -317,16 +190,9 @@ def main():
         print(f"Skipping {len(existing)} existing files; downloading {len(remotes)} files.")
 
         if args.dry_run:
-            for rf in remotes[:200]:
+            for rf in remotes:
                 print(rf.url)
-            if len(remotes) > 200:
-                print(f"... ({len(remotes)-200} more)")
             return
-
-        def job(rf: RemoteFile):
-            out_path = args.out / rf.name
-            download_with_resume(session, rf.url, out_path)
-            return rf.name
 
         # Note: requests.Session is not strictly thread-safe for heavy use.
         # For maximum robustness, create a new Session per thread:
